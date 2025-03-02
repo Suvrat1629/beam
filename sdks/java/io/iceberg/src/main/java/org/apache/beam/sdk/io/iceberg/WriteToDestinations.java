@@ -19,6 +19,7 @@ package org.apache.beam.sdk.io.iceberg;
 
 import static org.apache.beam.sdk.util.Preconditions.checkArgumentNotNull;
 
+import java.util.Map;
 import java.util.UUID;
 import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -56,7 +57,7 @@ class WriteToDestinations extends PTransform<PCollection<KV<String, Row>>, Icebe
   WriteToDestinations(
       IcebergCatalogConfig catalogConfig,
       DynamicDestinations dynamicDestinations,
-      @Nullable Duration triggeringFrequency) {
+      @Nullable Duration triggeringFrequency, @Nullable Map<String, String> partitionSpec) {
     this.dynamicDestinations = dynamicDestinations;
     this.catalogConfig = catalogConfig;
     this.triggeringFrequency = triggeringFrequency;

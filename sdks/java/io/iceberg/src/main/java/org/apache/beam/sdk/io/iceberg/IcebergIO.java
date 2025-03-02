@@ -22,6 +22,8 @@ import static org.apache.beam.sdk.util.Preconditions.checkStateNotNull;
 import com.google.auto.value.AutoValue;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+
 import org.apache.beam.sdk.annotations.Internal;
 import org.apache.beam.sdk.io.Read;
 import org.apache.beam.sdk.schemas.Schema;
@@ -330,6 +332,9 @@ public class IcebergIO {
 
     abstract @Nullable Duration getTriggeringFrequency();
 
+    // New field for partition spec
+    abstract @Nullable Map<String, String> getPartitionSpec();
+
     abstract Builder toBuilder();
 
     @AutoValue.Builder
@@ -341,6 +346,9 @@ public class IcebergIO {
       abstract Builder setDynamicDestinations(DynamicDestinations destinations);
 
       abstract Builder setTriggeringFrequency(Duration triggeringFrequency);
+
+      // New method to set the partition spec
+      abstract Builder setPartitionSpec(Map<String, String> partitionSpec);
 
       abstract WriteRows build();
     }
@@ -370,6 +378,16 @@ public class IcebergIO {
       return toBuilder().setTriggeringFrequency(triggeringFrequency).build();
     }
 
+    /**
+     * Sets the partition spec for the table.
+     *
+     * @param partitionSpec A map where the key is the column name and the value is the partition transform.
+     * @return The updated WriteRows transform.
+     */
+    public WriteRows withPartitionSpec(Map<String, String> partitionSpec) {
+      return toBuilder().setPartitionSpec(partitionSpec).build();
+    }
+
     @Override
     public IcebergWriteResult expand(PCollection<Row> input) {
       List<?> allToArgs = Arrays.asList(getTableIdentifier(), getDynamicDestinations());
@@ -384,13 +402,16 @@ public class IcebergIO {
                 Preconditions.checkNotNull(getTableIdentifier()), input.getSchema());
       }
 
-      // Assign destinations before re-windowing to global in WriteToDestinations because
-      // user's dynamic destination may depend on windowing properties
+      // Pass the partition spec to the WriteToDestinations transform
       return input
           .apply("Assign Table Destinations", new AssignDestinations(destinations))
           .apply(
               "Write Rows to Destinations",
-              new WriteToDestinations(getCatalogConfig(), destinations, getTriggeringFrequency()));
+              new WriteToDestinations(
+                  getCatalogConfig(),
+                  destinations,
+                  getTriggeringFrequency(),
+                  getPartitionSpec())); // Pass the partition spec
     }
   }
 
