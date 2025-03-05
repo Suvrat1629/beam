@@ -434,16 +434,16 @@ public class CassandraIO {
 
       private static <T> Set<RingRange> getRingRanges(Read<T> read) {
         try (Cluster cluster =
-            getCluster(
-                read.hosts(),
-                read.port(),
-                read.username(),
-                read.password(),
-                read.localDc(),
-                read.consistencyLevel(),
-                read.connectTimeout(),
-                read.readTimeout(),
-                read.sslOptions())) {
+                 getCluster(
+                     read.hosts(),
+                     read.port(),
+                     read.username(),
+                     read.password(),
+                     read.localDc(),
+                     read.consistencyLevel(),
+                     read.connectTimeout(),
+                     read.readTimeout(),
+                     read.sslOptions())) {
           if (isMurmur3Partitioner(cluster)) {
             LOG.info("Murmur3Partitioner detected, splitting");
             Integer splitCount;
@@ -1050,10 +1050,19 @@ public class CassandraIO {
    */
   @AutoValue
   public abstract static class ReadAll<T> extends PTransform<PCollection<Read<T>>, PCollection<T>> {
+    // Enum for handling actions, added for issue #34160
+    public enum HandlingAction {
+      RETRY,  // Retry the query
+      SKIP,   // Skip this spec and proceed
+      FAIL    // Throw the exception to the runner
+    }
+
     @AutoValue.Builder
     abstract static class Builder<T> {
-
       abstract Builder<T> setCoder(Coder<T> coder);
+
+      // Added for exception handler
+      abstract Builder<T> setExceptionHandler(SerializableFunction<Exception, HandlingAction> exceptionHandler);
 
       abstract ReadAll<T> autoBuild();
 
@@ -1065,6 +1074,10 @@ public class CassandraIO {
     @Nullable
     abstract Coder<T> coder();
 
+    // Added for issue #34160
+    @Nullable
+    abstract SerializableFunction<Exception, HandlingAction> exceptionHandler();
+
     abstract Builder<T> builder();
 
     /** Specify the {@link Coder} used to serialize the entity in the {@link PCollection}. */
@@ -1073,12 +1086,18 @@ public class CassandraIO {
       return builder().setCoder(coder).build();
     }
 
+    /** Specify an exception handler to handle errors during read operations. */
+    public ReadAll<T> withExceptionHandler(SerializableFunction<Exception, HandlingAction> exceptionHandler) {
+      checkArgument(exceptionHandler != null, "exceptionHandler can not be null");
+      return builder().setExceptionHandler(exceptionHandler).build();
+    }
+
     @Override
     public PCollection<T> expand(PCollection<Read<T>> input) {
       checkArgument(coder() != null, "withCoder() is required");
       return input
           .apply("Reshuffle", Reshuffle.viaRandomKey())
-          .apply("Read", ParDo.of(new ReadFn<>()))
+          .apply("Read", ParDo.of(new ReadFn<>(this)))
           .setCoder(this.coder());
     }
   }

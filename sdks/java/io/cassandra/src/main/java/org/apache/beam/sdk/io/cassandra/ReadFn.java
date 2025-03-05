@@ -28,67 +28,120 @@ import java.util.Iterator;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.beam.sdk.io.cassandra.CassandraIO.Read;
+import org.apache.beam.sdk.io.cassandra.CassandraIO.ReadAll;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.base.Joiner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 @SuppressWarnings({
-  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
-  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
+    "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+    "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class ReadFn<T> extends DoFn<Read<T>, T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(ReadFn.class);
 
+  // Default max retries for the RETRY action
+  private static final int DEFAULT_MAX_RETRIES = 3;
+
+  private final ReadAll<T> readAllSpec;
+
+  ReadFn() {
+    // This constructor is required for the ParDo transform, but we'll override it with the spec
+    this.readAllSpec = null;
+  }
+
+  // Constructor to accept the ReadAll spec from the transform
+  ReadFn(ReadAll<T> readAllSpec) {
+    this.readAllSpec = readAllSpec;
+  }
+
   @ProcessElement
   public void processElement(@Element Read<T> read, OutputReceiver<T> receiver) {
-    try {
-      Session session = ConnectionManager.getSession(read);
-      Mapper<T> mapper = read.mapperFactoryFn().apply(session);
-      String partitionKey =
-          session.getCluster().getMetadata().getKeyspace(read.keyspace().get())
-              .getTable(read.table().get()).getPartitionKey().stream()
-              .map(ColumnMetadata::getName)
-              .collect(Collectors.joining(","));
+    int maxRetries = DEFAULT_MAX_RETRIES;
+    int attempt = 0;
 
-      String query = generateRangeQuery(read, partitionKey, read.ringRanges() != null);
-      PreparedStatement preparedStatement = session.prepare(query);
-      Set<RingRange> ringRanges =
-          read.ringRanges() == null ? Collections.emptySet() : read.ringRanges().get();
+    while (attempt < maxRetries + 1) { // +1 to allow initial attempt before retries
+      try {
+        Session session = ConnectionManager.getSession(read);
+        Mapper<T> mapper = read.mapperFactoryFn().apply(session);
+        String partitionKey =
+            session.getCluster().getMetadata().getKeyspace(read.keyspace().get())
+                .getTable(read.table().get()).getPartitionKey().stream()
+                .map(ColumnMetadata::getName)
+                .collect(Collectors.joining(","));
 
-      for (RingRange rr : ringRanges) {
-        Token startToken = session.getCluster().getMetadata().newToken(rr.getStart().toString());
-        Token endToken = session.getCluster().getMetadata().newToken(rr.getEnd().toString());
-        if (rr.isWrapping()) {
-          // A wrapping range is one that overlaps from the end of the partitioner range and its
-          // start (ie : when the start token of the split is greater than the end token)
-          // We need to generate two queries here : one that goes from the start token to the end
-          // of
-          // the partitioner range, and the other from the start of the partitioner range to the
-          // end token of the split.
-          outputResults(
-              session.execute(getLowestSplitQuery(read, partitionKey, rr.getEnd())),
-              receiver,
-              mapper);
-          outputResults(
-              session.execute(getHighestSplitQuery(read, partitionKey, rr.getStart())),
-              receiver,
-              mapper);
-        } else {
-          ResultSet rs =
-              session.execute(
-                  preparedStatement.bind().setToken(0, startToken).setToken(1, endToken));
+        String query = generateRangeQuery(read, partitionKey, read.ringRanges() != null);
+        PreparedStatement preparedStatement = session.prepare(query);
+        Set<RingRange> ringRanges =
+            read.ringRanges() == null ? Collections.emptySet() : read.ringRanges().get();
+
+        for (RingRange rr : ringRanges) {
+          Token startToken = session.getCluster().getMetadata().newToken(rr.getStart().toString());
+          Token endToken = session.getCluster().getMetadata().newToken(rr.getEnd().toString());
+          if (rr.isWrapping()) {
+            // A wrapping range is one that overlaps from the end of the partitioner range and its
+            // start (ie : when the start token of the split is greater than the end token)
+            // We need to generate two queries here : one that goes from the start token to the end
+            // of the partitioner range, and the other from the start of the partitioner range to
+            // the end token of the split.
+            outputResults(
+                session.execute(getLowestSplitQuery(read, partitionKey, rr.getEnd())),
+                receiver,
+                mapper);
+            outputResults(
+                session.execute(getHighestSplitQuery(read, partitionKey, rr.getStart())),
+                receiver,
+                mapper);
+          } else {
+            ResultSet rs =
+                session.execute(
+                    preparedStatement.bind().setToken(0, startToken).setToken(1, endToken));
+            outputResults(rs, receiver, mapper);
+          }
+        }
+
+        if (read.ringRanges() == null) {
+          ResultSet rs = session.execute(preparedStatement.bind());
           outputResults(rs, receiver, mapper);
         }
-      }
 
-      if (read.ringRanges() == null) {
-        ResultSet rs = session.execute(preparedStatement.bind());
-        outputResults(rs, receiver, mapper);
+        return; // Success, exit the loop
+
+      } catch (Exception ex) {
+        attempt++;
+
+        // Check if a custom exception handler is provided via ReadAll spec
+        if (readAllSpec != null && readAllSpec.exceptionHandler() != null) {
+          ReadAll.HandlingAction action = readAllSpec.exceptionHandler().apply(ex);
+          switch (action) {
+            case RETRY:
+              if (attempt <= maxRetries) {
+                LOG.warn(
+                    "Retrying read operation due to exception, attempt {}/{}",
+                    attempt,
+                    maxRetries,
+                    ex);
+                continue; // Retry the loop
+              }
+              LOG.error("Max retries ({}) reached for read operation", maxRetries, ex);
+              return; // Max retries exhausted, give up
+            case SKIP:
+              LOG.info("Skipping read operation due to exception", ex);
+              return; // Skip this element and move on
+            case FAIL:
+              throw ex; // Rethrow to let the runner handle it
+            default:
+              LOG.warn("Unknown handling action {}, skipping read operation", action, ex);
+              return;
+          }
+        } else {
+          // Default behavior if no handler is provided
+          LOG.error("No exception handler defined, skipping read operation", ex);
+          return;
+        }
       }
-    } catch (Exception ex) {
-      LOG.error("error", ex);
     }
   }
 
@@ -127,10 +180,10 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
     final String rangeFilter =
         hasRingRange
             ? Joiner.on(" AND ")
-                .skipNulls()
-                .join(
-                    String.format("(token(%s) >= ?)", partitionKey),
-                    String.format("(token(%s) < ?)", partitionKey))
+            .skipNulls()
+            .join(
+                String.format("(token(%s) >= ?)", partitionKey),
+                String.format("(token(%s) < ?)", partitionKey))
             : "";
     final String combinedQuery = buildInitialQuery(spec, hasRingRange) + rangeFilter;
     LOG.debug("CassandraIO generated query : {}", combinedQuery);
@@ -140,7 +193,7 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
   private static String buildInitialQuery(Read<?> spec, Boolean hasRingRange) {
     return (spec.query() == null)
         ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
-            + " WHERE "
+        + " WHERE "
         : spec.query().get() + (hasRingRange ? getJoinerClause(spec.query().get()) : "");
   }
 
