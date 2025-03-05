@@ -35,8 +35,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 @SuppressWarnings({
-    "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
-    "nullness" // TODO(https://github.com/apache/beam/issues/20497)
+  "rawtypes", // TODO(https://github.com/apache/beam/issues/20447)
+  "nullness" // TODO(https://github.com/apache/beam/issues/20497)
 })
 class ReadFn<T> extends DoFn<Read<T>, T> {
 
@@ -180,10 +180,10 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
     final String rangeFilter =
         hasRingRange
             ? Joiner.on(" AND ")
-            .skipNulls()
-            .join(
-                String.format("(token(%s) >= ?)", partitionKey),
-                String.format("(token(%s) < ?)", partitionKey))
+                .skipNulls()
+                .join(
+                    String.format("(token(%s) >= ?)", partitionKey),
+                    String.format("(token(%s) < ?)", partitionKey))
             : "";
     final String combinedQuery = buildInitialQuery(spec, hasRingRange) + rangeFilter;
     LOG.debug("CassandraIO generated query : {}", combinedQuery);
@@ -193,7 +193,7 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
   private static String buildInitialQuery(Read<?> spec, Boolean hasRingRange) {
     return (spec.query() == null)
         ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
-        + " WHERE "
+            + " WHERE "
         : spec.query().get() + (hasRingRange ? getJoinerClause(spec.query().get()) : "");
   }
 

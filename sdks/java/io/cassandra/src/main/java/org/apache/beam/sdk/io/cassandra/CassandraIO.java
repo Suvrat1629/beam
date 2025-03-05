@@ -434,16 +434,16 @@ public class CassandraIO {
 
       private static <T> Set<RingRange> getRingRanges(Read<T> read) {
         try (Cluster cluster =
-                 getCluster(
-                     read.hosts(),
-                     read.port(),
-                     read.username(),
-                     read.password(),
-                     read.localDc(),
-                     read.consistencyLevel(),
-                     read.connectTimeout(),
-                     read.readTimeout(),
-                     read.sslOptions())) {
+            getCluster(
+                read.hosts(),
+                read.port(),
+                read.username(),
+                read.password(),
+                read.localDc(),
+                read.consistencyLevel(),
+                read.connectTimeout(),
+                read.readTimeout(),
+                read.sslOptions())) {
           if (isMurmur3Partitioner(cluster)) {
             LOG.info("Murmur3Partitioner detected, splitting");
             Integer splitCount;
@@ -1052,9 +1052,9 @@ public class CassandraIO {
   public abstract static class ReadAll<T> extends PTransform<PCollection<Read<T>>, PCollection<T>> {
     // Enum for handling actions, added for issue #34160
     public enum HandlingAction {
-      RETRY,  // Retry the query
-      SKIP,   // Skip this spec and proceed
-      FAIL    // Throw the exception to the runner
+      RETRY, // Retry the query
+      SKIP, // Skip this spec and proceed
+      FAIL // Throw the exception to the runner
     }
 
     @AutoValue.Builder
@@ -1062,7 +1062,8 @@ public class CassandraIO {
       abstract Builder<T> setCoder(Coder<T> coder);
 
       // Added for exception handler
-      abstract Builder<T> setExceptionHandler(SerializableFunction<Exception, HandlingAction> exceptionHandler);
+      abstract Builder<T> setExceptionHandler(
+          SerializableFunction<Exception, HandlingAction> exceptionHandler);
 
       abstract ReadAll<T> autoBuild();
 
@@ -1087,7 +1088,8 @@ public class CassandraIO {
     }
 
     /** Specify an exception handler to handle errors during read operations. */
-    public ReadAll<T> withExceptionHandler(SerializableFunction<Exception, HandlingAction> exceptionHandler) {
+    public ReadAll<T> withExceptionHandler(
+        SerializableFunction<Exception, HandlingAction> exceptionHandler) {
       checkArgument(exceptionHandler != null, "exceptionHandler can not be null");
       return builder().setExceptionHandler(exceptionHandler).build();
     }
