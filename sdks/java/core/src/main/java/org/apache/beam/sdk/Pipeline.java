@@ -162,6 +162,7 @@ public class Pipeline {
 
   /** Constructs a pipeline from the provided {@link PipelineOptions}. */
   public static Pipeline create(PipelineOptions options) {
+    // TODO: fix runners that mutate PipelineOptions in this method, then remove this line
     PipelineRunner.fromOptions(options);
     if (options.getRunner() == null) {
       LOG.warn(
@@ -284,12 +285,14 @@ public class Pipeline {
           @Override
           public CompositeBehavior enterCompositeTransform(Node node) {
             if (!node.isRootNode() && freedNodes.contains(node.getEnclosingNode())) {
+              // This node will be freed because its parent will be freed.
               freedNodes.add(node);
               return CompositeBehavior.ENTER_TRANSFORM;
             }
             if (!node.isRootNode()
                 && override.getMatcher().matches(node.toAppliedPTransform(getPipeline()))) {
               matches.add(node);
+              // This node will be freed. When we visit any of its children, they will also be freed
               freedNodes.add(node);
             }
             return CompositeBehavior.ENTER_TRANSFORM;
@@ -330,12 +333,18 @@ public class Pipeline {
    */
   public PipelineResult run(PipelineOptions options) {
     PipelineRunner<? extends PipelineResult> runner = PipelineRunner.fromOptions(options);
+    // Ensure all of the nodes are fully specified before a PipelineRunner gets access to the
+    // pipeline.
     LOG.debug("Running {} via {}", this, runner);
     try {
       validate(options);
       validateErrorHandlers();
       return runner.run(this);
     } catch (UserCodeException e) {
+      // This serves to replace the stack with one that ends here and
+      // is caused by the caught UserCodeException, thereby splicing
+      // out all the stack frames in between the PipelineRunner itself
+      // and where the worker calls into the user's code.
       throw new PipelineExecutionException(e.getCause());
     }
   }
@@ -382,19 +391,53 @@ public class Pipeline {
    */
   @Internal
   public interface PipelineVisitor {
+    /**
+     * Called before visiting anything values or transforms, as many uses of a visitor require
+     * access to the {@link Pipeline} object itself.
+     */
     void enterPipeline(Pipeline p);
+
+    /**
+     * Called for each composite transform after all topological predecessors have been visited but
+     * before any of its component transforms.
+     *
+     * <p>The return value controls whether or not child transforms are visited.
+     */
     CompositeBehavior enterCompositeTransform(TransformHierarchy.Node node);
+
+    /**
+     * Called for each composite transform after all of its component transforms and their outputs
+     * have been visited.
+     */
     void leaveCompositeTransform(TransformHierarchy.Node node);
+
+    /**
+     * Called for each primitive transform after all of its topological predecessors and inputs have
+     * been visited.
+     */
     void visitPrimitiveTransform(TransformHierarchy.Node node);
+
+    /** Called for each value after the transform that produced the value has been visited. */
     void visitValue(PValue value, TransformHierarchy.Node producer);
+
+    /** Called when all values and transforms in a {@link Pipeline} have been visited. */
     void leavePipeline(Pipeline pipeline);
 
+    /**
+     * Control enum for indicating whether or not a traversal should process the contents of a
+     * composite transform or not.
+     */
     enum CompositeBehavior {
       ENTER_TRANSFORM,
       DO_NOT_ENTER_TRANSFORM
     }
 
+    /**
+     * Default no-op {@link PipelineVisitor} that enters all composite transforms. User
+     * implementations can override just those methods they are interested in.
+     */
     class Defaults implements PipelineVisitor {
+
       private @Nullable Pipeline pipeline;
 
       protected Pipeline getPipeline() {
@@ -431,6 +474,20 @@ public class Pipeline {
     }
   }
 
+  /**
+   * <b><i>For internal use only; no backwards-compatibility guarantees.</i></b>
+   *
+   * <p>Invokes the {@link PipelineVisitor PipelineVisitor's} {@link
+   * PipelineVisitor#visitPrimitiveTransform} and {@link PipelineVisitor#visitValue} operations on
+   * each of this {@link Pipeline Pipeline's} transform and value nodes, in forward topological
+   * order.
+   *
+   * <p>Traversal of the {@link Pipeline} causes {@link PTransform PTransforms} and {@link PValue
+   * PValues} owned by the {@link Pipeline} to be marked as finished, at which point they may no
+   * longer be modified.
+   *
+   * <p>Typically invoked by {@link PipelineRunner} subclasses.
+   */
   @Internal
   public void traverseTopologically(PipelineVisitor visitor) {
     visitor.enterPipeline(this);
@@ -438,12 +495,29 @@ public class Pipeline {
     visitor.leavePipeline(this);
   }
 
+  /**
+   * <b><i>For internal use only; no backwards-compatibility guarantees.</i></b>
+   *
+   * <p>Like {@link #applyTransform(String, PInput, PTransform)} but defaulting to the name provided
+   * by the {@link PTransform}.
+   */
   @Internal
   public static <InputT extends PInput, OutputT extends POutput> OutputT applyTransform(
       InputT input, PTransform<? super InputT, OutputT> transform) {
     return input.getPipeline().applyInternal(transform.getName(), input, transform);
   }
 
+  /**
+   * <b><i>For internal use only; no backwards-compatibility guarantees.</i></b>
+   *
+   * <p>Applies the given {@code PTransform} to this input {@code InputT} and returns its {@code
+   * OutputT}. This uses {@code name} to identify this specific application of the transform. This
+   * name is used in various places, including the monitoring UI, logging, and to stably identify
+   * this application node in the {@link Pipeline} graph during update.
+   *
+   * <p>Each {@link PInput} subclass that provides an {@code apply} method should delegate to this
+   * method to ensure proper registration with the {@link PipelineRunner}.
+   */
   @Internal
   public static <InputT extends PInput, OutputT extends POutput> OutputT applyTransform(
       String name, InputT input, PTransform<? super InputT, OutputT> transform) {
@@ -455,10 +529,16 @@ public class Pipeline {
 
   private final TransformHierarchy transforms;
   private Set<String> usedFullNames = new HashSet<>();
+
+  /** Lazily initialized; access via {@link #getCoderRegistry()}. */
   private @Nullable CoderRegistry coderRegistry;
+
+  /** Lazily initialized; access via {@link #getSchemaRegistry()}. */
   private @Nullable SchemaRegistry schemaRegistry;
+
   private final Multimap<String, PTransform<?, ?>> instancePerName = ArrayListMultimap.create();
   private final PipelineOptions defaultOptions;
+
   private final List<ErrorHandler<?, ?>> errorHandlers = new ArrayList<>();
 
   private Pipeline(TransformHierarchy transforms, PipelineOptions options) {
@@ -476,18 +556,26 @@ public class Pipeline {
     return "Pipeline#" + hashCode();
   }
 
+  /**
+   * Applies a {@link PTransform} to the given {@link PInput}.
+   *
+   * @see Pipeline#apply
+   */
   private <InputT extends PInput, OutputT extends POutput> OutputT applyInternal(
       String name, InputT input, PTransform<? super InputT, OutputT> transform) {
     String namePrefix = transforms.getCurrent().getFullName();
     String uniqueName = uniquifyInternal(namePrefix, name);
+
     final String builtName = buildName(namePrefix, name);
     instancePerName.put(builtName, transform);
+
     LOG.debug("Adding {} to {}", transform, this);
     transforms.pushNode(uniqueName, input, transform);
     try {
       transforms.finishSpecifyingInput();
       OutputT output = transform.expand(input);
       transforms.setOutput(output);
+
       return output;
     } finally {
       transforms.popNode();
@@ -516,6 +604,7 @@ public class Pipeline {
       OutputT newOutput = replacement.getTransform().expand(originalInput);
       Map<PCollection<?>, ReplacementOutput> originalToReplacement =
           replacementFactory.mapOutputs(original.getOutputs(), newOutput);
+      // Ensure the internal TransformHierarchy data structures are consistent.
       transforms.setOutput(newOutput);
       transforms.replaceOutputs(originalToReplacement);
       checkState(
@@ -546,7 +635,7 @@ public class Pipeline {
               "The following transforms do not have stable unique names: {}",
               Joiner.on(", ").join(transform(errors, new KeysExtractor())));
           break;
-        case ERROR:
+        case ERROR: // be very verbose here since it will just fail the execution
           throw new IllegalStateException(
               String.format(
                   "Pipeline update will not be possible because the following transforms do"
@@ -565,6 +654,10 @@ public class Pipeline {
     }
   }
 
+  /**
+   * Returns a unique name for a transform with the given prefix (from enclosing transforms) and
+   * initial name.
+   */
   private String uniquifyInternal(String namePrefix, String origName) {
     String name = origName;
     int suffixNum = 2;
@@ -573,15 +666,18 @@ public class Pipeline {
       if (usedFullNames.add(candidate)) {
         return candidate;
       }
+      // A duplicate!  Retry.
       name = origName + suffixNum++;
     }
   }
 
+  /** Builds a name from a "/"-delimited prefix and a name. */
   private String buildName(String namePrefix, String name) {
     return namePrefix.isEmpty() ? name : namePrefix + "/" + name;
   }
 
   private static class ValidateVisitor extends PipelineVisitor.Defaults {
+
     private final PipelineOptions options;
 
     public ValidateVisitor(PipelineOptions options) {
