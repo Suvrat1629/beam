@@ -181,18 +181,15 @@ class UnboundedSolaceReader<T> extends UnboundedReader<T> {
 
   @Override
   public Instant getWatermark() {
-    // should be only used by a test receiver
     if (getSessionService().getReceiver().isEOF()) {
       return BoundedWindow.TIMESTAMP_MAX_VALUE;
     }
-    try {
-      return watermarkPolicy.getWatermark();
-    } catch (NullPointerException e) {
-      LOG.warn(
-          "SolaceIO.Read: WatermarkPolicy threw NPE (likely due to disconnection); returning min watermark",
-          e);
-      return BoundedWindow.TIMESTAMP_MIN_VALUE;
+    Instant watermark = watermarkPolicy.getWatermark();
+    if (watermark == null) {
+      LOG.warn("SolaceIO.Read: WatermarkPolicy returned null (likely due to disconnection); returning min watermark");
+      return BoundedWindow.TIMESTAMP_MIN_VALUE; // Fallback to min watermark during disconnection to prevent pipeline failure
     }
+    return watermark;
   }
 
   @Override
