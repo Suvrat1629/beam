@@ -98,6 +98,7 @@ var directFilters = []string{
 	"TestValueStateClear",
 	"TestBagState",
 	"TestBagStateClear",
+	"TestBagStateBlindWrite",
 	"TestCombiningState",
 	"TestMapState",
 	"TestMapStateClear",
@@ -240,6 +241,7 @@ var samzaFilters = []string{
 
 	// Samza does not support state.
 	"TestTimers.*",
+	"TestBagStateBlindWrite",
 
 	// no support for BundleFinalizer
 	"TestParDoBundleFinalizer.*",
@@ -313,6 +315,10 @@ var dataflowFilters = []string{
 	// Timers
 	"TestTimers_ProcessingTime_Infinity", // Uses test stream.
 	"TestTimers_ProcessingTime_Bounded",  // Dataflow ignores processing time timers in batch.
+	// Sometimes the Dataflow worker is killed by OOM before the heap dump code in boot.go is reached,
+	// so no dump file is created.
+	// TODO: https://github.com/apache/beam/issues/34498
+	"TestOomParDo",
 }
 
 // CheckFilters checks if an integration test is filtered to be skipped, either

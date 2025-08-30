@@ -52,6 +52,8 @@ import com.google.cloud.spanner.SpannerOptions;
 import com.google.cloud.spanner.Statement;
 import com.google.cloud.spanner.Struct;
 import com.google.cloud.spanner.TimestampBound;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -1015,6 +1017,32 @@ public class SpannerIO {
     }
   }
 
+  static class ChangeStreamRead extends PTransform<PBegin, PCollection<String>> {
+
+    ReadChangeStream readChangeStream;
+
+    public ChangeStreamRead(ReadChangeStream readChangeStream) {
+      this.readChangeStream = readChangeStream;
+    }
+
+    @Override
+    public PCollection<String> expand(PBegin input) {
+      return input
+          .apply(readChangeStream)
+          .apply("DataChangeRecordToStringJSON", ParDo.of(new DataChangeRecordToJsonFn()));
+    }
+  }
+
+  private static class DataChangeRecordToJsonFn extends DoFn<DataChangeRecord, String> {
+    private static Gson gson = new GsonBuilder().disableHtmlEscaping().create();
+
+    @ProcessElement
+    public void process(@Element DataChangeRecord input, OutputReceiver<String> receiver) {
+      String modJsonString = gson.toJson(input, DataChangeRecord.class);
+      receiver.output(modJsonString);
+    }
+  }
+
   /**
    * A {@link PTransform} that create a transaction. If applied to a {@link PCollection}, it will
    * create a transaction after the {@link PCollection} is closed.
@@ -1792,8 +1820,8 @@ public class SpannerIO {
               .orElse(PartitionMetadataTableNames.generateRandom(partitionMetadataDatabaseId));
       final String changeStreamName = getChangeStreamName();
       final Timestamp startTimestamp = getInclusiveStartAt();
-      // Uses (Timestamp.MAX - 1ns) at max for end timestamp, because we add 1ns to transform the
-      // interval into a closed-open in the read change stream restriction (prevents overflow)
+      // Uses (Timestamp.MAX - 1ns) at max for end timestamp to indicate this connector is expected
+      // to run forever.
       final Timestamp endTimestamp =
           getInclusiveEndAt().compareTo(MAX_INCLUSIVE_END_AT) > 0
               ? MAX_INCLUSIVE_END_AT

@@ -122,6 +122,12 @@ public abstract class DoFn<InputT extends @Nullable Object, OutputT extends @Nul
      */
     public abstract void output(OutputT output, Instant timestamp, BoundedWindow window);
 
+    public abstract void output(
+        OutputT output,
+        Instant timestamp,
+        BoundedWindow window,
+        @Nullable String currentRecordId,
+        @Nullable Long currentRecordOffset);
     /**
      * Adds the given element to the output {@code PCollection} with the given tag at the given
      * timestamp in the given window.
@@ -133,6 +139,14 @@ public abstract class DoFn<InputT extends @Nullable Object, OutputT extends @Nul
      */
     public abstract <T> void output(
         TupleTag<T> tag, T output, Instant timestamp, BoundedWindow window);
+
+    public abstract <T> void output(
+        TupleTag<T> tag,
+        T output,
+        Instant timestamp,
+        BoundedWindow window,
+        @Nullable String currentRecordId,
+        @Nullable Long currentRecordOffset);
   }
 
   /**
@@ -211,6 +225,14 @@ public abstract class DoFn<InputT extends @Nullable Object, OutputT extends @Nul
         Collection<? extends BoundedWindow> windows,
         PaneInfo paneInfo);
 
+    public abstract void outputWindowedValue(
+        OutputT output,
+        Instant timestamp,
+        Collection<? extends BoundedWindow> windows,
+        PaneInfo paneInfo,
+        @Nullable String currentRecordId,
+        @Nullable Long currentRecordOffset);
+
     /**
      * Adds the given element to the output {@code PCollection} with the given tag.
      *
@@ -283,6 +305,15 @@ public abstract class DoFn<InputT extends @Nullable Object, OutputT extends @Nul
         Instant timestamp,
         Collection<? extends BoundedWindow> windows,
         PaneInfo paneInfo);
+
+    public abstract <T> void outputWindowedValue(
+        TupleTag<T> tag,
+        T output,
+        Instant timestamp,
+        Collection<? extends BoundedWindow> windows,
+        PaneInfo paneInfo,
+        @Nullable String currentRecordId,
+        @Nullable Long currentRecordOffset);
   }
 
   /** Information accessible when running a {@link DoFn.ProcessElement} method. */
@@ -323,6 +354,12 @@ public abstract class DoFn<InputT extends @Nullable Object, OutputT extends @Nul
      */
     @Pure
     public abstract PaneInfo pane();
+
+    @Pure
+    public abstract String currentRecordId();
+
+    @Pure
+    public abstract Long currentRecordOffset();
   }
 
   /** Information accessible when running a {@link DoFn.OnTimer} method. */
@@ -1211,11 +1248,11 @@ public abstract class DoFn<InputT extends @Nullable Object, OutputT extends @Nul
    *
    * <ul>
    *   <li>The return type {@code WatermarkEstimatorStateT} defines the watermark state type used
-   *       within this splittable DoFn. All other methods that use a {@link
-   *       WatermarkEstimatorState @WatermarkEstimatorState} parameter must use the same type that
-   *       is used here. It is suggested to use as narrow of a return type definition as possible
-   *       (for example prefer to use a square type over a shape type as a square is a type of a
-   *       shape).
+   *       within this splittable DoFn. The return type is allowed to be nullable. All other methods
+   *       that use a {@link WatermarkEstimatorState @WatermarkEstimatorState} parameter must use
+   *       the same type that is used here. It is suggested to use as narrow of a return type
+   *       definition as possible (for example prefer to use a square type over a shape type as a
+   *       square is a type of a shape).
    *   <li>If one of its arguments is tagged with the {@link Element} annotation, then it will be
    *       passed the current element being processed; the argument must be of type {@code InputT}.
    *       Note that automatic conversion of {@link Row}s and {@link FieldAccess} parameters are

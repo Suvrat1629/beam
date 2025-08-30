@@ -99,12 +99,14 @@ __all__ = [
     'Tee',
     'Values',
     'WithKeys',
-    'GroupIntoBatches'
+    'GroupIntoBatches',
+    'WaitOn'
 ]
 
 K = TypeVar('K')
 V = TypeVar('V')
 T = TypeVar('T')
+U = TypeVar('U')
 
 RESHUFFLE_TYPEHINT_BREAKING_CHANGE_VERSION = "2.64.0"
 
@@ -265,7 +267,9 @@ class _CoGBKImpl(PTransform):
     ]
             | Flatten(pipeline=self.pipeline)
             | GroupByKey()
-            | MapTuple(collect_values))
+            | MapTuple(collect_values).with_input_types(
+                tuple[K, Iterable[tuple[U, V]]]).with_output_types(
+                    tuple[K, dict[U, list[V]]]))
 
 
 @ptransform_fn
@@ -928,25 +932,72 @@ class _IdentityWindowFn(NonMergingWindowFn):
     return self._window_coder
 
 
+def is_v1_prior_to_v2(*, v1, v2):
+  if v1 is None:
+    return False
+
+  v1_parts = (v1.split('.') + ['0', '0', '0'])[:3]
+  v2_parts = (v2.split('.') + ['0', '0', '0'])[:3]
+  return tuple(map(int, v1_parts)) < tuple(map(int, v2_parts))
+
+
 def is_compat_version_prior_to(options, breaking_change_version):
   # This function is used in a branch statement to determine whether we should
   # keep the old behavior prior to a breaking change or use the new behavior.
   # - If update_compatibility_version < breaking_change_version, we will return
   #   True and keep the old behavior.
-  # - If update_compatibility_version is None or >= breaking_change_version, we
-  #   will return False and use the behavior from the breaking change.
   update_compatibility_version = options.view_as(
       pipeline_options.StreamingOptions).update_compatibility_version
 
-  if update_compatibility_version is None:
-    return False
+  return is_v1_prior_to_v2(
+      v1=update_compatibility_version, v2=breaking_change_version)
 
-  compat_version = tuple(map(int, update_compatibility_version.split('.')[0:3]))
-  change_version = tuple(map(int, breaking_change_version.split('.')[0:3]))
-  for i in range(min(len(compat_version), len(change_version))):
-    if compat_version[i] < change_version[i]:
-      return True
-  return False
+
+def reify_metadata_default_window(
+    element, timestamp=DoFn.TimestampParam, pane_info=DoFn.PaneInfoParam):
+  key, value = element
+  if timestamp == window.MIN_TIMESTAMP:
+    timestamp = None
+  return key, (value, timestamp, pane_info)
+
+
+def restore_metadata_default_window(element):
+  key, values = element
+  return [
+      window.GlobalWindows.windowed_value(None).with_value((key, value))
+      if timestamp is None else window.GlobalWindows.windowed_value(
+          value=(key, value), timestamp=timestamp, pane_info=pane_info)
+      for (value, timestamp, pane_info) in values
+  ]
+
+
+def reify_metadata_custom_window(
+    element,
+    timestamp=DoFn.TimestampParam,
+    window=DoFn.WindowParam,
+    pane_info=DoFn.PaneInfoParam):
+  key, value = element
+  return key, windowed_value.WindowedValue(
+    value, timestamp, [window], pane_info)
+
+
+def restore_metadata_custom_window(element):
+  key, windowed_values = element
+  return [wv.with_value((key, wv.value)) for wv in windowed_values]
+
+
+def _reify_restore_metadata(is_default_windowing):
+  if is_default_windowing:
+    return reify_metadata_default_window, restore_metadata_default_window
+  return reify_metadata_custom_window, restore_metadata_custom_window
+
+
+def _add_pre_map_gkb_types(pre_gbk_map, is_default_windowing):
+  if is_default_windowing:
+    return pre_gbk_map.with_input_types(tuple[K, V]).with_output_types(
+        tuple[K, tuple[V, Optional[Timestamp], windowed_value.PaneInfo]])
+  return pre_gbk_map.with_input_types(tuple[K, V]).with_output_types(
+      tuple[K, TypedWindowedValue[V]])
 
 
 @typehints.with_input_types(tuple[K, V])
@@ -957,7 +1008,7 @@ class ReshufflePerKey(PTransform):
   in particular checkpointing, and preventing fusion of the surrounding
   transforms.
   """
-  def expand(self, pcoll):
+  def expand_2_64_0(self, pcoll):
     windowing_saved = pcoll.windowing
     if windowing_saved.is_default():
       # In this (common) case we can use a trivial trigger driver
@@ -1020,6 +1071,33 @@ class ReshufflePerKey(PTransform):
         ungrouped
         | GroupByKey()
         | FlatMap(restore_timestamps).with_output_types(Any))
+    result._windowing = windowing_saved
+    return result
+
+  def expand(self, pcoll):
+    if is_compat_version_prior_to(pcoll.pipeline.options, "2.65.0"):
+      return self.expand_2_64_0(pcoll)
+
+    windowing_saved = pcoll.windowing
+    is_default_windowing = windowing_saved.is_default()
+    reify_fn, restore_fn = _reify_restore_metadata(is_default_windowing)
+
+    pre_gbk_map = _add_pre_map_gkb_types(Map(reify_fn), is_default_windowing)
+
+    ungrouped = pcoll | pre_gbk_map
+
+    # TODO(https://github.com/apache/beam/issues/19785) Using global window as
+    # one of the standard window. This is to mitigate the Dataflow Java Runner
+    # Harness limitation to accept only standard coders.
+    ungrouped._windowing = Windowing(
+        window.GlobalWindows(),
+        triggerfn=Always(),
+        accumulation_mode=AccumulationMode.DISCARDING,
+        timestamp_combiner=TimestampCombiner.OUTPUT_AT_EARLIEST)
+    result = (
+        ungrouped
+        | GroupByKey()
+        | FlatMap(restore_fn).with_output_types(Any))
     result._windowing = windowing_saved
     return result
 
@@ -1108,9 +1186,7 @@ def WithKeys(pcoll, k, *args, **kwargs):
              for arg in args) and all(isinstance(kwarg, AsSideInput)
                                       for kwarg in kwargs.values()):
         return pcoll | Map(
-            lambda v,
-            *args,
-            **kwargs: (k(v, *args, **kwargs), v),
+            lambda v, *args, **kwargs: (k(v, *args, **kwargs), v),
             *args,
             **kwargs)
       return pcoll | Map(lambda v: (k(v, *args, **kwargs), v))
@@ -1254,8 +1330,8 @@ class _GroupIntoBatchesParams:
         'batch_size must be a positive value')
     assert (
         self.max_buffering_duration_secs is not None and
-        self.max_buffering_duration_secs >= 0), (
-            'max_buffering_duration must be a non-negative value')
+        self.max_buffering_duration_secs
+        >= 0), ('max_buffering_duration must be a non-negative value')
 
   def get_payload(self):
     return beam_runner_api_pb2.GroupIntoBatchesPayload(
@@ -1375,30 +1451,49 @@ class LogElements(PTransform):
     level: (optional) The logging level for the output (e.g. `logging.DEBUG`,
         `logging.INFO`, `logging.WARNING`, `logging.ERROR`). If not specified,
         the log is printed to stdout.
+    with_pane_info (bool): (optional) Whether to include element's pane info.
+    use_epoch_time (bool): (optional) Whether to display epoch timestamps.
   """
   class _LoggingFn(DoFn):
     def __init__(
-        self, prefix='', with_timestamp=False, with_window=False, level=None):
+        self,
+        prefix='',
+        with_timestamp=False,
+        with_window=False,
+        level=None,
+        with_pane_info=False,
+        use_epoch_time=False):
       super().__init__()
       self.prefix = prefix
       self.with_timestamp = with_timestamp
       self.with_window = with_window
       self.level = level
+      self.with_pane_info = with_pane_info
+      self.use_epoch_time = use_epoch_time
+
+    def format_timestamp(self, timestamp):
+      if self.use_epoch_time:
+        return timestamp.seconds()
+      return timestamp.to_rfc3339()
 
     def process(
         self,
         element,
         timestamp=DoFn.TimestampParam,
         window=DoFn.WindowParam,
+        pane_info=DoFn.PaneInfoParam,
         **kwargs):
       log_line = self.prefix + str(element)
 
       if self.with_timestamp:
-        log_line += ', timestamp=' + repr(timestamp.to_rfc3339())
+        log_line += ', timestamp=' + repr(self.format_timestamp(timestamp))
 
       if self.with_window:
-        log_line += ', window(start=' + window.start.to_rfc3339()
-        log_line += ', end=' + window.end.to_rfc3339() + ')'
+        log_line += ', window(start=' + str(self.format_timestamp(window.start))
+        log_line += ', end=' + str(self.format_timestamp(window.end)) + ')'
+
+      if self.with_pane_info:
+        log_line += ', pane_info=' + repr(pane_info)
 
       if self.level == logging.DEBUG:
         logging.debug(log_line)
@@ -1421,17 +1516,28 @@ class LogElements(PTransform):
       prefix='',
       with_timestamp=False,
       with_window=False,
-      level=None):
+      level=None,
+      with_pane_info=False,
+      use_epoch_time=False,
+  ):
     super().__init__(label)
     self.prefix = prefix
     self.with_timestamp = with_timestamp
     self.with_window = with_window
+    self.with_pane_info = with_pane_info
+    self.use_epoch_time = use_epoch_time
     self.level = level
 
   def expand(self, input):
     return input | ParDo(
         self._LoggingFn(
-            self.prefix, self.with_timestamp, self.with_window, self.level))
+            self.prefix,
+            self.with_timestamp,
+            self.with_window,
+            self.level,
+            self.with_pane_info,
+            self.use_epoch_time,
+        ))
 
 
 class Reify(object):

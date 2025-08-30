@@ -76,6 +76,7 @@ func RunPipeline(j *jobservices.Job) {
 	// any related job resources.
 	defer func() {
 		j.CancelFn(fmt.Errorf("runPipeline returned, cleaning up"))
+		j.WaitForCleanUp()
 	}()
 
 	j.SendMsg("running " + j.String())
@@ -95,7 +96,7 @@ func RunPipeline(j *jobservices.Job) {
 	j.SendMsg("pipeline completed " + j.String())
 
 	j.SendMsg("terminating " + j.String())
-	j.Done()
+	j.PendingDone()
 }
 
 type transformExecuter interface {
@@ -145,7 +146,20 @@ func executePipeline(ctx context.Context, wks map[string]*worker.W, j *jobservic
 	topo := prepro.preProcessGraph(comps, j)
 	ts := comps.GetTransforms()
 
-	em := engine.NewElementManager(engine.Config{})
+	config := engine.Config{}
+	m := j.PipelineOptions().AsMap()
+	if experimentsSlice, ok := m["beam:option:experiments:v1"].([]interface{}); ok {
+		for _, exp := range experimentsSlice {
+			if expStr, ok := exp.(string); ok {
+				if expStr == "prism_enable_rtc" {
+					config.EnableRTC = true
+					break // Found it, no need to check the rest of the slice
+				}
+			}
+		}
+	}
+
+	em := engine.NewElementManager(config)
 
 	// TODO move this loop and code into the preprocessor instead.
 	stages := map[string]*stage{}
