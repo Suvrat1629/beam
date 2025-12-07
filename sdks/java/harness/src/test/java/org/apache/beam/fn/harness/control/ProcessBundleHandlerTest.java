@@ -1989,10 +1989,11 @@ public class ProcessBundleHandlerTest {
         ProcessBundleHandler.class.getDeclaredField("topologicalOrderCache");
     f.setAccessible(true);
     @SuppressWarnings("unchecked")
-    com.google.common.cache.LoadingCache<String, com.google.common.collect.ImmutableList<String>>
+    org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache<
+            String, ImmutableList<String>>
         cache =
-            (com.google.common.cache.LoadingCache<
-                    String, com.google.common.collect.ImmutableList<String>>)
+            (org.apache.beam.vendor.guava.v32_1_2_jre.com.google.common.cache.LoadingCache<
+                    String, ImmutableList<String>>)
                 f.get(handler);
 
     ImmutableList<String> topo = cache.get("chain");
@@ -2079,7 +2080,8 @@ public class ProcessBundleHandlerTest {
     assertTrue(transformsProcessed.contains("A"));
     assertTrue(transformsProcessed.contains("B"));
     assertTrue(transformsProcessed.contains("C"));
-    // fnApiRegistry should have been consulted exactly once for the descriptor during cache load.
-    assertEquals(1, calls.get());
+    // fnApiRegistry is consulted twice: once for the topological cache load,
+    // and once during actual bundle processing.
+    assertEquals(2, calls.get());
   }
 }

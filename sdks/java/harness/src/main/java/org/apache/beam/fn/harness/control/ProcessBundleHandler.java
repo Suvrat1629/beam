@@ -243,6 +243,9 @@ public class ProcessBundleHandler {
                         .putAllTransforms(desc.getTransformsMap())
                         .putAllWindowingStrategies(desc.getWindowingStrategiesMap())
                         .build();
+
+                // Pass all transform IDs to QueryablePipeline
+                // QueryablePipeline will build the network and compute topological order
                 QueryablePipeline qp =
                     QueryablePipeline.forTransforms(desc.getTransformsMap().keySet(), comps);
                 ImmutableList.Builder<String> ids = ImmutableList.builder();
